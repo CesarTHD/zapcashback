@@ -157,21 +157,29 @@ export function SatClients() {
   const [sort, setSort] = useState("");
   const [offset, setOffset] = useState(0);
   const result = useSat<Page>("/clients?" + new URLSearchParams({ q, city, sort, offset: String(offset) }));
-  const download = useMutation({ mutationFn: async () => {
+  const summary = useSat<{ total: number; birthdays: number; active90: number; withCashback: number; whatsapp: number | null }>("/clients/summary");
+  const download = useMutation({ mutationFn: async (format: "csv" | "xlsx") => {
     const { data: { session } } = await supabase.auth.getSession();
     if (!session) throw new Error("Sessão encerrada");
-    const response = await fetchSat(`/clients/export.csv?${new URLSearchParams({ q, city, sort })}`, {
+    const response = await fetchSat(`/clients/export.${format}?${new URLSearchParams({ q, city, sort })}`, {
       headers: { Authorization: `Bearer ${session.access_token}` },
     });
     const url = URL.createObjectURL(await response.blob());
     const link = document.createElement("a");
     link.href = url;
-    link.download = "clientes-sat.csv";
+    link.download = `clientes-sat.${format}`;
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   } });
   return <Screen title="Clientes" subtitle="Cadastro do ERP SAT"
-    actions={<Button size="sm" variant="outline" disabled={download.isPending} onClick={() => download.mutate()}><Download />Exportar CSV</Button>}>
+    actions={<>
+      <Button size="sm" variant="outline" disabled={download.isPending} onClick={() => download.mutate("xlsx")}><Download />Exportar XLSX</Button>
+      <Button size="sm" variant="outline" disabled={download.isPending} onClick={() => download.mutate("csv")}><Download />CSV</Button>
+    </>}>
+    {summary.data && <Stats highlight cols="md:grid-cols-5" values={[["Clientes cadastrados",summary.data.total.toLocaleString("pt-BR")],
+      ["Compraram nos últimos 90 dias",summary.data.active90.toLocaleString("pt-BR")],["Com cashback disponível",summary.data.withCashback.toLocaleString("pt-BR")],
+      ["Aniversariantes do mês",summary.data.birthdays.toLocaleString("pt-BR")],
+      ["WhatsApp promocional autorizado",summary.data.whatsapp == null ? null : summary.data.whatsapp.toLocaleString("pt-BR")]]} />}
     <Card flush>
       <div className="flex flex-wrap items-end gap-3 border-b px-5 py-4">
         <Field label="Busca" className="min-w-56 flex-1"><Input aria-label="Busca" placeholder="Nome, CPF/CNPJ ou telefone" value={q} onChange={e => {setQ(e.target.value); setOffset(0);}} /></Field>
