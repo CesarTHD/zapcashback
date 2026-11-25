@@ -100,7 +100,7 @@ function Pagination({ offset, more, change }: { offset: number; more: boolean; c
 const statusColors: Record<string, string> = {
   disponível: "text-emerald-700", ativa: "text-emerald-700", autorizado: "text-emerald-700", sim: "text-emerald-700",
   pendente: "text-amber-700", expirado: "text-muted-foreground", inativa: "text-muted-foreground", não: "text-muted-foreground",
-  estornado: "text-red-600", estorno: "text-red-600",
+  estornado: "text-red-600", estorno: "text-red-600", cancelado: "text-red-600", resgatado: "text-sky-700", indefinido: "text-amber-700",
 };
 
 function StatusText({ value }: { value: Cell | undefined }) {
@@ -256,7 +256,7 @@ export function SatClient() {
           <Status pending={wallet.isPending} error={wallet.error} />
           {wallet.data && <>
             <Card title="Carteira">
-              <Facts items={[["Disponível",<span className="text-primary">{cents(wallet.data.balance.available)}</span>],["Pendente",cents(wallet.data.balance.pending)],
+              <Facts items={[["Disponível",<span className="text-primary">{cents(wallet.data.balance.available)}</span>],["Resgatado",cents(wallet.data.balance.redeemed)],
                 ["Total gerado",cents(wallet.data.balance.generated)],["Expirado",cents(wallet.data.balance.expired)]]} />
             </Card>
             <Card title="Comunicação">
@@ -285,7 +285,7 @@ export function SatClient() {
             </Card>
             <Card title="Próximos créditos a vencer">
               {wallet.data.credits.length ? <Facts items={wallet.data.credits.map(r => [
-                `Filial ${r.branch} · ${r.expires_at ? new Date(String(r.expires_at)).toLocaleDateString("pt-BR") : "—"}`, cents(r.amount_cents)])} />
+                `Filial ${r.branch} · ${r.expires_at ? String(r.expires_at).slice(0,10).split("-").reverse().join("/") : "—"}`, cents(r.amount_cents)])} />
                 : <p className="text-sm text-muted-foreground">Nenhum crédito a vencer.</p>}
             </Card>
             <Card title="Últimas mensagens SAT">
@@ -375,7 +375,7 @@ export function SatDashboard() {
       <Status pending={wallet.isPending} error={wallet.error} />
       {wallet.data && <>
         <Stats highlight values={[["Gerado",cents(walletSum("generated"))],["Ainda disponível",cents(walletSum("available"))],
-          ["Pendente",cents(walletSum("pending"))],["Expirado",cents(walletSum("expired"))]]} />
+          ["Resgatado",cents(walletSum("redeemed"))],["Expirado",cents(walletSum("expired"))]]} />
         <Chart title="Evolução do cashback gerado" rows={wallet.data.rows.map(r => ({ ...r, TOTAL: Number(r.generated)/100 }))} axis="day" />
       </>}
     </div>
@@ -384,8 +384,9 @@ export function SatDashboard() {
 
 /* ───────────── Cashback ───────────── */
 
+const brDate = (value: Cell | undefined) => value ? String(value).slice(0,10).split("-").reverse().join("/") : "—";
+
 export function SatCashback() {
-  const cache = useQueryClient();
   const [offset,setOffset] = useState(0);
   const [params] = useSearchParams();
   const customer = params.get("customer");
@@ -393,128 +394,53 @@ export function SatCashback() {
   const pageParams = new URLSearchParams({ ...filters, offset:String(offset) });
   if (customer) pageParams.set("customer",customer);
   const page = useSat<Page>("/cashback?" + pageParams);
-  const [date,setDate] = useState(params.get("date") || "");
-  const [saleId,setSaleId] = useState(params.get("sale") || "");
-  const args = { date, saleId };
-  const preview = useMutation({ mutationFn: () => request<Row>("/cashback/preview",args) });
-  const create = useMutation({ mutationFn: () => request<Row>("/cashback",{
-    ...args, saleCents: preview.data?.saleCents, creditCents: preview.data?.creditCents,
-  }), onSuccess: () => {
-    preview.reset();
-    void cache.invalidateQueries({ queryKey: ["sat"] });
-  } });
-  const reverse = useMutation({ mutationFn: (id: Cell) => request<Row>(`/cashback/${id}/reversal`,{}),
-    onSuccess: () => cache.invalidateQueries({ queryKey: ["sat"] }) });
   const role = useSatAccess()?.role;
-  function submit(event: FormEvent) {
-    event.preventDefault();
-    create.reset();
-    preview.mutate();
-  }
-  const busy = preview.isPending || create.isPending;
-  return <Screen title="Cashback" subtitle={customer ? `Cliente SAT ${customer}` : "Créditos gerados a partir das vendas do ERP"}
-    actions={<>
-      <LinkButton to="/contacts">Buscar cliente e selecionar uma compra</LinkButton>
-      {role === "admin" && <LinkButton to="/cashback/rules">Configurar regras</LinkButton>}
-    </>}>
-    <div className="grid items-start gap-6 xl:grid-cols-[1fr_340px]">
-      <Card title="Movimentações" flush className="order-2 xl:order-1">
-        <form className="flex flex-wrap items-end gap-3 border-b px-5 py-4" onSubmit={e => {
-          e.preventDefault();
-          setFilters(Object.fromEntries(Array.from(new FormData(e.currentTarget)).filter(([,v]) => v !== "").map(([k,v]) => [k,String(v)])));
-          setOffset(0);
-        }}>
-          <Field label="Filial" className="w-28"><Input type="number" min="1" name="branch" placeholder="Todas" /></Field>
-          <Field label="Venda a partir de" className="w-40"><Input type="date" name="start" /></Field>
-          <Field label="Venda até" className="w-40"><Input type="date" name="end" /></Field>
-          <Field label="Status" className="w-36"><select name="status" className="sat-select">
-            <option value="">Todos</option>{["disponível","pendente","expirado","estornado","estorno"].map(s => <option key={s}>{s}</option>)}
-          </select></Field>
-          <Button type="submit" variant="outline">Filtrar</Button>
-        </form>
-        {(page.isPending || page.error || reverse.isPending || reverse.error) && <div className="space-y-2 px-5 py-4">
-          <Status pending={page.isPending} error={page.error} /><Status pending={reverse.isPending} error={reverse.error} />
-        </div>}
-        {page.data && <><Grid bare right={[4,5]} columns={["Cliente SAT","Venda","Data da venda","Filial","Valor da venda","Cashback","Status","Origem", "Ações"]}
-          rows={page.data.rows.map(r => [<TextLink to={`/contacts/${r.customer}`}>{r.customer}</TextLink>,
-            r.sale_id,r.sale_date,r.branch,cents(r.sale_cents),<span className="font-semibold">{cents(r.amount_cents)}</span>,<StatusText value={r.status} />,
-            r.source === "manual" ? "Manual" : "Automática",
-            role === "admin" && r.kind === "credit" && r.status !== "estornado" ? <Button size="sm" variant="ghost" className="h-7 text-red-600 hover:bg-red-50 hover:text-red-700"
-              disabled={reverse.isPending} onClick={() => {
-                if (window.confirm("Registrar estorno desse crédito?")) reverse.mutate(r.id);
-              }}>Estornar</Button> : null])} />
-          <Pagination offset={offset} more={page.data.more} change={setOffset} /></>}
-      </Card>
-
-      <form className="glass order-1 overflow-hidden rounded-xl xl:order-2" onSubmit={submit}>
-        <div className="glass-green !rounded-none !border-0 px-5 py-4">
-          <h2 className="text-sm font-semibold">Gerar crédito</h2>
-          <p className="text-xs text-emerald-100/80">Para uma venda registrada no ERP SAT</p>
-        </div>
-        <div className="space-y-3 p-5">
-          <Field label="Data da venda"><Input type="date" required value={date} disabled={busy}
-            onChange={e => {setDate(e.target.value); preview.reset();}} /></Field>
-          <Field label="ID da venda"><Input type="number" min="0" required value={saleId} disabled={busy}
-            onChange={e => {setSaleId(e.target.value); preview.reset();}} /></Field>
-          <Button type="submit" variant="outline" className="w-full" disabled={busy}>Simular crédito</Button>
-          <Status pending={busy} error={preview.error || create.error} />
-          {preview.data && <div className="space-y-3 rounded-lg border border-emerald-200/70 bg-emerald-50/60 p-4">
-            <Facts items={[["Cliente SAT",preview.data.customer],["Filial",preview.data.branch],
-              ["Valor da venda no ERP",cents(preview.data.saleCents)],["Saldo disponível na filial",cents(preview.data.availableCents)]]} />
-            <div className="flex items-baseline justify-between border-t border-dashed border-foreground/20 pt-3">
-              <span className="text-sm font-medium">Crédito previsto</span>
-              <span className="text-xl font-bold text-primary tabular-nums">{cents(preview.data.creditCents)}</span>
-            </div>
-            <Button type="button" className="w-full" disabled={create.isPending} onClick={() => create.mutate()}>Confirmar geração</Button>
-          </div>}
-          {create.isSuccess && <Done>Crédito registrado.</Done>}
-        </div>
-      </form>
+  return <Screen title="Cashback" subtitle={customer ? `Cliente SAT ${customer}` : "Créditos de cashback no ERP SAT"}
+    actions={role === "admin" && <LinkButton to="/cashback/rules">Regras das lojas</LinkButton>}>
+    <div className="grid items-start gap-6">
+      <div className="min-w-0 space-y-6">
+        <Card title="Movimentações" flush>
+          <form className="flex flex-wrap items-end gap-3 border-b px-5 py-4" onSubmit={e => {
+            e.preventDefault();
+            setFilters(Object.fromEntries(Array.from(new FormData(e.currentTarget)).filter(([,v]) => v !== "").map(([k,v]) => [k,String(v)])));
+            setOffset(0);
+          }}>
+            <Field label="Cliente" className="min-w-56 flex-1"><Input name="q" placeholder="Nome, CPF/CNPJ ou telefone" maxLength={100} /></Field>
+            <Field label="Filial" className="w-28"><Input type="number" min="1" name="branch" placeholder="Todas" /></Field>
+            <Field label="Venda a partir de" className="w-40"><Input type="date" name="start" /></Field>
+            <Field label="Venda até" className="w-40"><Input type="date" name="end" /></Field>
+            <Field label="Status" className="w-36"><select name="status" className="sat-select">
+              <option value="">Todos</option>{["disponível","expirado","resgatado","cancelado","indefinido"].map(s => <option key={s}>{s}</option>)}
+            </select></Field>
+            <Button type="submit" variant="outline">Filtrar</Button>
+          </form>
+          {(page.isPending || page.error) && <div className="px-5 py-4"><Status pending={page.isPending} error={page.error} /></div>}
+          {page.data && <><Grid bare right={[4,5,6,7]} columns={["Cliente","Venda","Data da venda","Filial","Valor da venda","Cashback","Resgatado","Saldo","Validade","Status"]}
+            rows={page.data.rows.map(r => [<div className="min-w-0">
+                <TextLink to={`/contacts/${r.customer}`}>{r.name || `Cliente ${r.customer}`}</TextLink>
+                <p className="text-xs text-muted-foreground">{r.phone || "Sem telefone"} · #{r.customer}</p></div>,
+              r.sale_id,brDate(r.sale_date),r.branch ?? "—",cents(r.sale_cents),<span className="font-semibold">{cents(r.amount_cents)}</span>,
+              cents(r.redeemed_cents),cents(r.remaining_cents),brDate(r.expires_at),<StatusText value={r.status} />])} />
+            <Pagination offset={offset} more={page.data.more} change={setOffset} /></>}
+        </Card>
+      </div>
     </div>
   </Screen>;
 }
 
 /* ───────────── Regras ───────────── */
 
-const ruleInputs = [
-  ["branch","Código da filial",0,32767],["basisPoints","Percentual em pontos-base (100 = 1%)",0,10000],
-  ["minimumCents","Compra mínima em centavos",0],["maximumCents","Crédito máximo em centavos",1],
-  ["delayDays","Prazo de liberação em dias",0,365],["validityDays","Validade em dias após liberação",1,3650],
-  ["redemptionLimitCents","Limite demonstrativo em centavos",1],["redemptionBasisPoints","Limite demonstrativo em pontos-base",1,10000],
-] as const;
-
 export function SatRules() {
   const query = useSat<{ rows: Row[] }>("/rules");
-  const cache = useQueryClient();
-  const save = useMutation({ mutationFn: (form: FormData) => {
-    const values = Object.fromEntries(form.entries());
-    return request(`/rules/${values.branch}`,{ ...values, enabled: form.has("enabled"),
-      redemptionLimitCents: values.redemptionLimitCents || null, redemptionBasisPoints: values.redemptionBasisPoints || null }, "PUT");
-  }, onSuccess: () => cache.invalidateQueries({ queryKey: ["sat"] }) });
+  const percent = (value: Cell | undefined) => value == null ? "—" : `${Number(value).toLocaleString("pt-BR")}%`;
   return <Screen title="Regras de cashback" subtitle={<Link to="/cashback" className="hover:text-primary">← Cashback</Link>}>
-    <Status pending={query.isPending || save.isPending} error={query.error || save.error} />
-    {query.data && <div className="grid items-start gap-6 xl:grid-cols-[1fr_380px]">
-      <Card title="Regras cadastradas" flush>
-        <Grid bare right={[3,4,5,6,7]} columns={["Filial","Estado","Vigência","Pontos-base","Compra mínima","Crédito máximo","Liberação (dias)","Validade (dias)"]}
-          rows={query.data.rows.map(r => [r.branch || "Rede",<StatusText value={r.enabled ? "Ativa" : "Inativa"} />,r.starts_on,r.basis_points,
-          cents(r.minimum_cents),cents(r.maximum_cents),r.delay_days,r.validity_days])} />
-      </Card>
-      <Card title="Cadastrar ou substituir regra">
-        <form className="space-y-3" onSubmit={event => {
-          event.preventDefault();
-          save.mutate(new FormData(event.currentTarget));
-        }}>
-          <p className="text-xs text-muted-foreground">Use filial 0 para a regra padrão da rede.</p>
-          {ruleInputs.map(([key,label,min,max]) => <Field label={label} key={key}>
-            <Input name={key} type="number" min={min} max={max} required={!key.startsWith("redemption")} />
-          </Field>)}
-          <Field label="Início da vigência"><Input name="startsOn" type="date" required /></Field>
-          <Check name="enabled" label="Ativar regra" />
-          <Button type="submit" className="w-full" disabled={save.isPending}>Salvar regra</Button>
-          {save.isSuccess && <Done>Regra salva.</Done>}
-        </form>
-      </Card>
-    </div>}
+    <Status pending={query.isPending} error={query.error} />
+    {query.data && <Card title="Configuração por loja no ERP SAT" flush>
+      <Grid bare right={[3,4,5,6]} columns={["Loja","Nome","Cashback","Percentual","Percentual da venda","Compra mínima","Validade (dias)"]}
+        rows={query.data.rows.map(r => [r.branch,r.name ?? "—",<StatusText value={r.enabled ? "Ativa" : "Inativa"} />,
+          percent(r.percent),percent(r.sale_percent),cents(r.minimum_cents),r.validity_days ?? "—"])} />
+      <p className="border-t px-5 py-3 text-xs text-muted-foreground">As regras são lidas da tabela LOJAS do ERP. Para alterá-las, use o cadastro de lojas no SAT.</p>
+    </Card>}
   </Screen>;
 }
 
@@ -564,6 +490,7 @@ export function SatAudience() {
             <Field label="Cidade"><Input name="city" maxLength={100} /></Field>
             <Field label="Cashback"><select name="wallet" className="sat-select">
               <option value="">Qualquer saldo</option><option value="available">Disponível</option><option value="expiring">Próximo de expirar</option>
+              <option value="used">Já resgatou</option><option value="never_used">Nunca resgatou</option>
             </select></Field>
             <Field label="Última compra a partir de"><Input name="lastPurchaseFrom" type="date" /></Field>
             <Field label="Última compra até"><Input name="lastPurchaseTo" type="date" /></Field>
@@ -653,6 +580,7 @@ export function SatAutomations() {
       <form key={event + String(selected?.template) + String(selected?.enabled) + String(selected?.days)} className="space-y-4 p-5"
         onSubmit={e => {e.preventDefault(); save.mutate(new FormData(e.currentTarget));}}>
         <h2 className="text-sm font-semibold">{automationNames[event]}</h2>
+        {event === "released" && <p className="text-xs text-muted-foreground">No SAT o crédito fica disponível assim que a venda é registrada, então este evento dispara junto com "Cashback gerado". Ative apenas um dos dois.</p>}
         {(event === "expiring" || event === "inactive") && <Field label={event === "expiring" ? "Dias de antecedência" : "Dias sem comprar"} className="max-w-xs">
           <Input name="days" type="number" min="1" max="3650" required defaultValue={selected?.days ?? 7} />
         </Field>}
