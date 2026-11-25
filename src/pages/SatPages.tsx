@@ -560,6 +560,7 @@ export function SatAudience() {
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             <Field label="Código do cliente"><Input name="customer" type="number" min="0" defaultValue={search.get("customer") ?? ""} /></Field>
             <Field label="Cidade"><Input name="city" maxLength={100} /></Field>
+            <Field label="Comprou o produto (códigos)"><Input name="productCodes" placeholder="Ex.: 12, 345" maxLength={200} /></Field>
             <Field label="Cashback"><select name="wallet" className="sat-select">
               <option value="">Qualquer saldo</option><option value="available">Disponível</option><option value="expiring">Próximo de expirar</option>
               <option value="used">Já resgatou</option><option value="never_used">Nunca resgatou</option>
