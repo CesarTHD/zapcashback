@@ -6,6 +6,7 @@ import { Download, RefreshCw } from "lucide-react";
 import { AppLayout } from "@/components/AppLayout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
 
@@ -196,10 +197,36 @@ function birthdayThisMonth(value: Cell | undefined) {
   return !!month && Number(month) === new Date().getMonth() + 1;
 }
 
+function SaleItems({ sale, items, close }: { sale: Row | null; close: () => void;
+  items: { data?: Page; isPending: boolean; error: Error | null } }) {
+  const quantity = new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 3 });
+  const returned = (r: Row) => r.CANC ? "Cancelado" : Number(r.QUANT_DEVOLVIDO) > 0 ? `Devolvido ${quantity.format(Number(r.QUANT_DEVOLVIDO))}` : null;
+  return <Dialog open={!!sale} onOpenChange={open => { if (!open) close(); }}>
+    <DialogContent className="max-w-3xl gap-0 overflow-hidden p-0">
+      <DialogHeader className="border-b px-6 py-4">
+        <DialogTitle>Itens da venda {sale?.ID_OE}</DialogTitle>
+        <DialogDescription>{sale && `${String(sale.DIA).split("-").reverse().join("/")} · Filial ${sale.LOJA} · Total ${money(sale.TOTAL)}`}</DialogDescription>
+      </DialogHeader>
+      <div className="max-h-[60vh] overflow-y-auto">
+        {(items.isPending || items.error) && <div className="px-6 py-4"><Status pending={items.isPending} error={items.error} /></div>}
+        {items.data && <Grid bare right={[1,2,3,4]} columns={["Produto","Qtd.","Unitário","Desconto","Total","Situação"]}
+          rows={items.data.rows.map(r => [<span className="block max-w-[18rem] truncate" title={String(r.NOME ?? "")}>
+              {r.NOME || `Produto ${r.COD}`}<span className="ml-2 text-xs text-muted-foreground">#{r.COD}</span></span>,
+            quantity.format(Number(r.QUANT ?? 0)),money(r.UNITARIO),money(r.DESCONTO),<span className="font-semibold">{money(r.TOTAL)}</span>,
+            <StatusText value={returned(r)} />])} />}
+      </div>
+      {items.data && <div className="flex items-center justify-between gap-3 border-t px-6 py-3 text-sm">
+        <span className="text-muted-foreground">{items.data.rows.length} {items.data.rows.length === 1 ? "item" : "itens"}{items.data.more ? " (exibindo os 100 primeiros)" : ""}</span>
+        <span>Total dos itens <span className="ml-1 font-semibold tabular-nums">{money(items.data.rows.reduce((sum,r) => sum+Number(r.TOTAL ?? 0),0))}</span></span>
+      </div>}
+    </DialogContent>
+  </Dialog>;
+}
+
 export function SatClient() {
   const { id } = useParams();
   const [offset,setOffset] = useState(0);
-  const [sale,setSale] = useState("");
+  const [sale,setSale] = useState<Row | null>(null);
   const data = useSat<{ client: Row; metrics: Row; sales: Row[]; more: boolean }>(`/clients/${id}?offset=${offset}`);
   const wallet = useSat<{ balance: Row; credits: Row[]; messages: Row[];
     consent: { promotional: boolean; transactional: boolean; opted_out: boolean } | null }>(`/clients/${id}/cashback`);
@@ -210,8 +237,8 @@ export function SatClient() {
     promotional: form.get("promotional") === "on", transactional: form.get("transactional") === "on",
     optedOut: form.get("optedOut") === "on", evidence: form.get("evidence"),
   }, "PUT"), onSuccess: () => cache.invalidateQueries({ queryKey: ["sat"] }) });
-  const items = useQuery({ queryKey: ["sat",user?.id,id,sale,"items"], enabled: !!sale,
-    queryFn: () => request<Page>(`/clients/${id}/sales/${sale}/items`), retry: false });
+  const items = useQuery({ queryKey: ["sat",user?.id,id,sale?.DIA,sale?.ID_OE,"items"], enabled: !!sale,
+    queryFn: () => request<Page>(`/clients/${id}/sales/${sale?.DIA}/${sale?.ID_OE}/items`), retry: false });
   const { client, metrics, sales, more } = data.data ?? {};
   const initials = String(client?.NOME ?? "?").split(/\s+/).filter(Boolean).slice(0, 2).map(p => p[0]).join("").toUpperCase();
   return <Screen title={String(client?.NOME ?? "Perfil do cliente")} subtitle={<Link to="/contacts" className="hover:text-primary">← Clientes</Link>}
@@ -241,16 +268,11 @@ export function SatClient() {
           <Card title="Compras" flush>
             <Grid bare right={[3,4]} columns={["Data","Venda","Filial","Total","Desconto","Itens","Cashback"]} rows={sales.map(r =>
               [r.DIA,r.ID_OE,r.LOJA,money(r.TOTAL),money(r.DESCONTO),
-                <Button size="sm" variant="ghost" className="h-7 text-primary" onClick={() => setSale(`${r.DIA}/${r.ID_OE}`)}>Ver itens</Button>,
+                <Button size="sm" variant="ghost" className="h-7 text-primary" onClick={() => setSale(r)}>Ver itens</Button>,
                 <TextLink to={`/cashback?customer=${id}&date=${r.DIA}&sale=${r.ID_OE}`}>Simular crédito</TextLink>])} />
             <Pagination offset={offset} more={!!more} change={setOffset} />
           </Card>
-          {sale && <Card title={`Itens da venda ${sale.split("/")[1]}`} flush
-            actions={<Button size="sm" variant="ghost" onClick={() => setSale("")}>Fechar</Button>}>
-            {(items.isPending || items.error) && <div className="px-5 py-4"><Status pending={items.isPending} error={items.error} /></div>}
-            {items.data && <Grid bare right={[1,2,4]} columns={["Produto","Quantidade","Total","Cancelamento","Qtd. devolvida"]}
-              rows={items.data.rows.map(r => [r.NOME || r.COD,r.QUANT,money(r.TOTAL),r.CANC,r.QUANT_DEVOLVIDO])} />}
-          </Card>}
+          <SaleItems sale={sale} items={items} close={() => setSale(null)} />
         </div>
         <div className="space-y-6">
           <Status pending={wallet.isPending} error={wallet.error} />
