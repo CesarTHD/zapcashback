@@ -502,11 +502,31 @@ function LaunchCredit({ initialDate, initialSale, onDone }: { initialDate: strin
   </form>;
 }
 
+const onlyDigits = (value: unknown) => String(value ?? "").replace(/\D/g,"");
+/** CPF/CNPJ só com dígitos → formatado com pontuação (o ERP pode guardar de qualquer um dos dois jeitos). */
+const maskDocument = (d: string) => d.length === 11 ? d.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/,"$1.$2.$3-$4") :
+  d.length === 14 ? d.replace(/(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})/,"$1.$2.$3/$4-$5") : d;
+
 function RedeemCredit({ initialCustomer, onDone }: { initialCustomer: string; onDone: () => void }) {
-  const [customer,setCustomer] = useState(initialCustomer);
+  const [documentText,setDocumentText] = useState("");
+  const [picked,setPicked] = useState("");
   const [amount,setAmount] = useState("");
   const [reference,setReference] = useState("");
   const { user } = useAuth();
+  const typed = onlyDigits(documentText);
+  const searchable = typed.length === 11 || typed.length === 14;
+  const lookup = useQuery({ queryKey: ["sat",user?.id,"redeem-lookup",typed], enabled: searchable, retry: false,
+    queryFn: async () => {
+      const pages = await Promise.all([...new Set([typed, maskDocument(typed)])]
+        .map(q => request<{ rows: Row[] }>(`/clients?q=${encodeURIComponent(q)}`)));
+      const found = new Map<number, Row>();
+      for (const page of pages) for (const row of page.rows) if (onlyDigits(row.CPF) === typed) found.set(Number(row.CODCLI), row);
+      return [...found.values()];
+    } });
+  const matches = lookup.data ?? [];
+  // Sem CPF digitado, usa o cliente vindo da URL (?customer=); com CPF, o único encontrado ou o escolhido na lista.
+  const customer = documentText ? (matches.length === 1 ? String(matches[0].CODCLI) : picked) : initialCustomer;
+  const selected = matches.find(row => String(row.CODCLI) === customer);
   const valid = /^\d+$/.test(customer);
   const wallet = useQuery({ queryKey: ["sat",user?.id,"redeem-wallet",customer], enabled: valid, retry: false,
     queryFn: () => request<{ balance: Row }>(`/clients/${customer}/cashback`) });
@@ -516,14 +536,26 @@ function RedeemCredit({ initialCustomer, onDone }: { initialCustomer: string; on
     { customer, amountCents, reference: reference || undefined }), onSuccess: () => { setAmount(""); setReference(""); onDone(); } });
   return <form className="glass overflow-hidden rounded-xl" onSubmit={e => {
     e.preventDefault();
-    if (amountCents && window.confirm(`Resgatar ${cents(amountCents)} do cliente ${customer}? O valor será baixado no ERP.`)) redeem.mutate();
+    if (amountCents && window.confirm(`Resgatar ${cents(amountCents)} do cliente ${selected?.NOME || customer} (código ${customer})? O valor será baixado no ERP.`)) redeem.mutate();
   }}>
     <div className="border-b border-emerald-900/10 px-5 py-4">
       <h2 className="text-sm font-semibold">Resgatar cashback</h2>
       <p className="text-xs text-muted-foreground">Baixa o saldo disponível, dos créditos mais antigos para os mais novos</p>
     </div>
     <div className="space-y-3 p-5">
-      <Field label="Código do cliente"><Input type="number" min="0" required value={customer} onChange={e => { setCustomer(e.target.value); redeem.reset(); }} /></Field>
+      <Field label="CPF/CNPJ do cliente"><Input inputMode="numeric" maxLength={18} required={!initialCustomer} placeholder="000.000.000-00"
+        value={documentText} onChange={e => { setDocumentText(e.target.value); setPicked(""); redeem.reset(); }} /></Field>
+      {!documentText && initialCustomer && <p className="text-xs text-muted-foreground">Cliente #{initialCustomer} selecionado. Digite um CPF/CNPJ para trocar.</p>}
+      {documentText && !searchable && <p className="text-xs text-muted-foreground">Digite os 11 dígitos do CPF ou os 14 do CNPJ.</p>}
+      {searchable && <Status pending={lookup.isPending} error={lookup.error} />}
+      {lookup.data && matches.length === 0 && <p className="text-xs text-red-600">Nenhum cliente encontrado com esse documento.</p>}
+      {matches.length > 1 && <Field label="Mais de um cadastro com esse documento"><select className="sat-select w-full" required value={picked}
+        onChange={e => { setPicked(e.target.value); redeem.reset(); }}>
+        <option value="">Escolha o cliente</option>
+        {matches.map(row => <option key={row.CODCLI} value={String(row.CODCLI)}>{row.NOME || "Sem nome"} · #{row.CODCLI}{row.TELEFONE ? ` · ${row.TELEFONE}` : ""}</option>)}
+      </select></Field>}
+      {selected && matches.length === 1 && <p className="text-sm"><TextLink to={`/contacts/${selected.CODCLI}`}>{selected.NOME || `Cliente ${selected.CODCLI}`}</TextLink>
+        <span className="text-xs text-muted-foreground"> · #{selected.CODCLI}</span></p>}
       {valid && <Status pending={wallet.isPending} error={wallet.error} />}
       {wallet.data && <p className="flex items-baseline justify-between text-sm"><span className="text-muted-foreground">Saldo disponível</span>
         <span className="text-lg font-semibold text-primary tabular-nums">{cents(available)}</span></p>}
