@@ -1,8 +1,8 @@
 import { FormEvent, ReactNode, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { Download, RefreshCw } from "lucide-react";
+import { Bar, BarChart, CartesianGrid, ComposedChart, Legend, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Download, Lightbulb, RefreshCw } from "lucide-react";
 import { AppLayout } from "@/components/AppLayout";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -346,6 +346,33 @@ function Chart({ title, rows, axis, color = "hsl(var(--primary))", height = 240 
   </Card>;
 }
 
+/** Vendas (barras, eixo esquerdo) comparadas com cashback gerado e resgatado (linhas, eixo direito). */
+function ComparisonChart({ rows }: { rows: Row[] }) {
+  const axis = { fontSize: 11, tickLine: false, stroke: "hsl(var(--muted-foreground))" };
+  return <Card title="Comparativo de vendas, cashback e resgates">
+    {rows.length ? <ResponsiveContainer width="100%" height={280}><ComposedChart data={rows}>
+      <CartesianGrid vertical={false} stroke="hsl(var(--border))" />
+      <XAxis dataKey="DIA" {...axis} axisLine={{ stroke: "hsl(var(--border))" }} />
+      <YAxis yAxisId="sales" {...axis} axisLine={false} width={64} />
+      <YAxis yAxisId="cashback" orientation="right" {...axis} axisLine={false} width={56} />
+      <Tooltip contentStyle={{ borderRadius: 6, border: "1px solid hsl(var(--border))", fontSize: 12 }} formatter={value => money(Number(value))} />
+      <Legend wrapperStyle={{ fontSize: 12 }} />
+      <Bar yAxisId="sales" dataKey="TOTAL" name="Vendas" fill="hsl(var(--primary))" fillOpacity={0.85} radius={[2,2,0,0]} maxBarSize={28} />
+      <Line yAxisId="cashback" dataKey="CASHBACK_GERADO" name="Cashback gerado" stroke="hsl(var(--chart-3))" strokeWidth={2} dot={false} type="monotone" />
+      <Line yAxisId="cashback" dataKey="CASHBACK_RESGATADO" name="Cashback resgatado" stroke="hsl(var(--chart-4))" strokeWidth={2} dot={false} type="monotone" />
+    </ComposedChart></ResponsiveContainer> : <p className="py-8 text-center text-sm text-muted-foreground">Sem vendas no período.</p>}
+  </Card>;
+}
+
+/** Recomendações calculadas a partir dos indicadores do período. */
+function Insights({ items }: { items: ReactNode[] }) {
+  if (!items.length) return null;
+  return <Card title="Insights do período">
+    <ul className="grid gap-3 md:grid-cols-2">{items.map((item,i) => <li key={i} className="flex gap-3 rounded-lg border border-white/70 bg-white/50 p-3 text-sm">
+      <Lightbulb className="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-500" /><span>{item}</span></li>)}</ul>
+  </Card>;
+}
+
 function dateInput(date: Date) {
   return new Intl.DateTimeFormat("sv-SE", { timeZone: "America/Sao_Paulo" }).format(date);
 }
@@ -367,6 +394,20 @@ export function SatDashboard() {
   const hour = data?.hours.reduce<Row | undefined>((current,row) => !current || Number(row.TOTAL)>Number(current.TOTAL) ? row : current,undefined);
   const percent = new Intl.NumberFormat("pt-BR",{style:"percent",maximumFractionDigits:1});
   const variation = data && Number(data.prior.TOTAL)>0 ? Number(data.totals.TOTAL)/Number(data.prior.TOTAL)-1 : null;
+  const weekdayNames = ["domingo","segunda-feira","terça-feira","quarta-feira","quinta-feira","sexta-feira","sábado"];
+  const bestWeekday = weekdays.reduce((top,day,i) => day.TOTAL > weekdays[top].TOTAL ? i : top, 0);
+  const generated = Number(data?.totals.CASHBACK_GERADO ?? 0);
+  const redeemed = Number(data?.totals.CASHBACK_RESGATADO ?? 0);
+  const salesCount = Number(data?.totals.VENDAS ?? 0);
+  const insights: ReactNode[] = [];
+  if (data && salesCount > 0) {
+    if (weekdays[bestWeekday].TOTAL > 0) insights.push(<>Seu público compra mais às <b>{weekdayNames[bestWeekday]}s</b>. Agende campanhas para a véspera.</>);
+    if (hour) insights.push(<>O pico de faturamento é por volta das <b>{String(hour.HORA)}h</b>. Mensagens enviadas antes desse horário tendem a ter mais efeito.</>);
+    insights.push(<><b>{percent.format(Number(data.totals.VENDAS_COM_GERACAO)/salesCount)}</b> das vendas do período geraram cashback.</>);
+    if (generated > 0 && redeemed === 0) insights.push(<>Nenhum cashback foi resgatado no período. <TextLink to="/sat-audience">Lembre os clientes com saldo disponível</TextLink>.</>);
+    if (redeemed > 0) insights.push(<>As vendas com resgate somaram <b>{money(data.totals.FATURAMENTO_COM_RESGATE)}</b>, ou {money(Number(data.totals.FATURAMENTO_COM_RESGATE)/redeemed)} para cada R$ 1,00 resgatado.</>);
+    if (Number(data.cohorts.INATIVOS) > 0) insights.push(<><b>{String(data.cohorts.INATIVOS)}</b> clientes compraram no período anterior e não voltaram. <TextLink to="/sat-audience">Monte uma campanha de reativação</TextLink>.</>);
+  }
   const today = dateInput(new Date());
   const ranges: [string, string][] = [["7 dias", dateInput(new Date(Date.now()-6*86400000))], ["30 dias", dateInput(new Date(Date.now()-29*86400000))],
     ["90 dias", dateInput(new Date(Date.now()-89*86400000))], ["Ano", today.slice(0,4)+"-01-01"]];
@@ -385,7 +426,7 @@ export function SatDashboard() {
       <Stats highlight values={[["Vendas no período",money(data.totals.TOTAL),variation == null ? null :
           <span className={variation < 0 ? "text-red-200" : "text-emerald-100"}>{variation < 0 ? "▼" : "▲"} {percent.format(variation)} vs. período anterior</span>],
         ["Quantidade de vendas",data.totals.VENDAS],["Ticket médio",money(data.totals.TICKET_MEDIO)],["Clientes compradores",data.totals.CLIENTES],
-        ["Vendas com cashback no ERP",data.totals.VENDAS_COM_CASHBACK],["Novos compradores",data.cohorts.NOVOS],["Compradores recorrentes",data.cohorts.RECORRENTES],
+        ["Vendas com resgate de cashback",data.totals.VENDAS_COM_CASHBACK],["Novos compradores",data.cohorts.NOVOS],["Compradores recorrentes",data.cohorts.RECORRENTES],
         ["Taxa de recompra no período",Number(data.totals.CLIENTES) > 0 ? percent.format(Number(data.cohorts.RECOMPRA)/Number(data.totals.CLIENTES)) : null]]} />
       <div className="grid items-start gap-6 lg:grid-cols-3">
         <div className="min-w-0 lg:col-span-2"><Chart title="Evolução de vendas" rows={data.daily} axis="DIA" height={280} /></div>
@@ -395,6 +436,7 @@ export function SatDashboard() {
             ["Variação de vendas",variation == null ? null : percent.format(variation)],["Compraram só no período anterior",data.cohorts.INATIVOS]]} />
         </Card>
       </div>
+      <Insights items={insights} />
       <div className="grid gap-6 lg:grid-cols-2">
         <Chart title="Vendas por dia da semana" rows={data.daily.length ? weekdays : []} axis="label" color="hsl(var(--chart-2))" />
         <Chart title="Vendas por horário" rows={data.hours} axis="HORA" color="hsl(var(--chart-2))" />
@@ -406,7 +448,7 @@ export function SatDashboard() {
       {wallet.data && <>
         <Stats highlight values={[["Gerado",cents(walletSum("generated"))],["Ainda disponível",cents(walletSum("available"))],
           ["Resgatado",cents(walletSum("redeemed"))],["Expirado",cents(walletSum("expired"))]]} />
-        <Chart title="Evolução do cashback gerado" rows={wallet.data.rows.map(r => ({ ...r, TOTAL: Number(r.generated)/100 }))} axis="day" />
+        {data && <ComparisonChart rows={data.daily} />}
       </>}
     </div>
   </Screen>;
