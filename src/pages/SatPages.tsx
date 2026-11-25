@@ -46,7 +46,7 @@ function useSat<T>(path: string) {
 }
 
 function useSatAccess() {
-  return useSat<{ role: string; branches: number[] | null }>("/access").data;
+  return useSat<{ role: string; branches: number[] | null; erpWrite?: boolean }>("/access").data;
 }
 
 /* ───────────── Blocos visuais ───────────── */
@@ -250,7 +250,7 @@ export function SatClient() {
   const { client, metrics, sales, more } = data.data ?? {};
   const initials = String(client?.NOME ?? "?").split(/\s+/).filter(Boolean).slice(0, 2).map(p => p[0]).join("").toUpperCase();
   return <Screen title={String(client?.NOME ?? "Perfil do cliente")} subtitle={<Link to="/contacts" className="hover:text-primary">← Clientes</Link>}
-    actions={<LinkButton to={`/cashback?customer=${id}`}>Movimentações de cashback</LinkButton>}>
+    actions={<LinkButton to={`/cashback?customer=${id}`}>Cashback: movimentar, lançar e resgatar</LinkButton>}>
     <Status pending={data.isPending} error={data.error} />
     {client && metrics && sales && <>
       <section className="glass-green flex flex-wrap items-center gap-4 rounded-xl p-5">
@@ -277,7 +277,7 @@ export function SatClient() {
             <Grid bare right={[3,4]} columns={["Data","Venda","Filial","Total","Desconto","Itens","Cashback"]} rows={sales.map(r =>
               [r.DIA,r.ID_OE,r.LOJA,money(r.TOTAL),money(r.DESCONTO),
                 <Button size="sm" variant="ghost" className="h-7 text-primary" onClick={() => setSale(r)}>Ver itens</Button>,
-                <TextLink to={`/cashback?customer=${id}&date=${r.DIA}&sale=${r.ID_OE}`}>Simular crédito</TextLink>])} />
+                <TextLink to={`/cashback?customer=${id}&date=${r.DIA}&sale=${r.ID_OE}`}>Lançar</TextLink>])} />
             <Pagination offset={offset} more={!!more} change={setOffset} />
           </Card>
           <SaleItems sale={sale} items={items} close={() => setSale(null)} />
@@ -456,9 +456,102 @@ export function SatDashboard() {
 
 /* ───────────── Cashback ───────────── */
 
+/** "12,34" ou "12.34" → 1234 centavos; null se inválido. */
+function parseMoney(value: string) {
+  const normalized = value.trim().replace(/\s/g,"").replace(/\.(?=\d{3}(\D|$))/g,"").replace(",",".");
+  if (!/^\d+(\.\d{1,2})?$/.test(normalized)) return null;
+  const cents = Math.round(Number(normalized)*100);
+  return Number.isSafeInteger(cents) && cents > 0 ? cents : null;
+}
+
+type Quote = { customer: number; name: string | null; branch: number; saleCents: string; redeemedCents: string; baseCents: string;
+  percent: number; creditCents: string; validityDays: number; expiresOn: string; availableCents: string };
 const brDate = (value: Cell | undefined) => value ? String(value).slice(0,10).split("-").reverse().join("/") : "—";
 
+function LaunchCredit({ initialDate, initialSale, onDone }: { initialDate: string; initialSale: string; onDone: () => void }) {
+  const [date,setDate] = useState(initialDate);
+  const [saleId,setSaleId] = useState(initialSale);
+  const preview = useMutation({ mutationFn: () => request<Quote>("/cashback/preview",{ date, saleId }) });
+  const create = useMutation({ mutationFn: () => request<Quote & { code: number }>("/cashback",{ date, saleId, creditCents: preview.data?.creditCents }),
+    onSuccess: () => { preview.reset(); onDone(); } });
+  const busy = preview.isPending || create.isPending;
+  return <form className="glass overflow-hidden rounded-xl" onSubmit={e => { e.preventDefault(); create.reset(); preview.mutate(); }}>
+    <div className="glass-green !rounded-none !border-0 px-5 py-4">
+      <h2 className="text-sm font-semibold">Lançar cashback</h2>
+      <p className="text-xs text-emerald-100/80">Para uma venda registrada no ERP, pela regra da loja</p>
+    </div>
+    <div className="space-y-3 p-5">
+      <Field label="Data da venda"><Input type="date" required value={date} disabled={busy} onChange={e => { setDate(e.target.value); preview.reset(); }} /></Field>
+      <Field label="Número da venda"><Input type="number" min="0" required value={saleId} disabled={busy} onChange={e => { setSaleId(e.target.value); preview.reset(); }} /></Field>
+      <Button type="submit" variant="outline" className="w-full" disabled={busy}>Simular</Button>
+      <Status pending={busy} error={preview.error || create.error} />
+      {preview.data && <div className="space-y-3 rounded-lg border border-emerald-200/70 bg-emerald-50/60 p-4">
+        <Facts items={[["Cliente",<TextLink to={`/contacts/${preview.data.customer}`}>{preview.data.name || preview.data.customer}</TextLink>],
+          ["Loja",preview.data.branch],["Valor da venda",cents(preview.data.saleCents)],
+          ...(Number(preview.data.redeemedCents) > 0 ? [["Pago com cashback",cents(preview.data.redeemedCents)] as [ReactNode, ReactNode]] : []),
+          ["Percentual da loja",`${preview.data.percent.toLocaleString("pt-BR")}%`],["Validade",`${brDate(preview.data.expiresOn)} (${preview.data.validityDays} dias)`],
+          ["Saldo atual do cliente",cents(preview.data.availableCents)]]} />
+        <div className="flex items-baseline justify-between border-t border-dashed border-foreground/20 pt-3">
+          <span className="text-sm font-medium">Cashback a lançar</span>
+          <span className="text-xl font-bold text-primary tabular-nums">{cents(preview.data.creditCents)}</span>
+        </div>
+        <Button type="button" className="w-full" disabled={create.isPending} onClick={() => create.mutate()}>Confirmar lançamento no ERP</Button>
+      </div>}
+      {create.isSuccess && <Done>Cashback de {cents(create.data.creditCents)} lançado (registro {create.data.code}).</Done>}
+    </div>
+  </form>;
+}
+
+function RedeemCredit({ initialCustomer, onDone }: { initialCustomer: string; onDone: () => void }) {
+  const [customer,setCustomer] = useState(initialCustomer);
+  const [amount,setAmount] = useState("");
+  const [reference,setReference] = useState("");
+  const { user } = useAuth();
+  const valid = /^\d+$/.test(customer);
+  const wallet = useQuery({ queryKey: ["sat",user?.id,"redeem-wallet",customer], enabled: valid, retry: false,
+    queryFn: () => request<{ balance: Row }>(`/clients/${customer}/cashback`) });
+  const amountCents = parseMoney(amount);
+  const available = Number(wallet.data?.balance.available ?? 0);
+  const redeem = useMutation({ mutationFn: () => request<{ redeemedCents: string; availableAfterCents: string }>("/cashback/redemptions",
+    { customer, amountCents, reference: reference || undefined }), onSuccess: () => { setAmount(""); setReference(""); onDone(); } });
+  return <form className="glass overflow-hidden rounded-xl" onSubmit={e => {
+    e.preventDefault();
+    if (amountCents && window.confirm(`Resgatar ${cents(amountCents)} do cliente ${customer}? O valor será baixado no ERP.`)) redeem.mutate();
+  }}>
+    <div className="border-b border-emerald-900/10 px-5 py-4">
+      <h2 className="text-sm font-semibold">Resgatar cashback</h2>
+      <p className="text-xs text-muted-foreground">Baixa o saldo disponível, dos créditos mais antigos para os mais novos</p>
+    </div>
+    <div className="space-y-3 p-5">
+      <Field label="Código do cliente"><Input type="number" min="0" required value={customer} onChange={e => { setCustomer(e.target.value); redeem.reset(); }} /></Field>
+      {valid && <Status pending={wallet.isPending} error={wallet.error} />}
+      {wallet.data && <p className="flex items-baseline justify-between text-sm"><span className="text-muted-foreground">Saldo disponível</span>
+        <span className="text-lg font-semibold text-primary tabular-nums">{cents(available)}</span></p>}
+      <Field label="Valor do resgate (R$)"><Input inputMode="decimal" required placeholder="0,00" value={amount} onChange={e => { setAmount(e.target.value); redeem.reset(); }} /></Field>
+      {amount && !amountCents && <p className="text-xs text-red-600">Informe um valor válido, por exemplo 12,50.</p>}
+      {amountCents && wallet.data && amountCents > available && <p className="text-xs text-red-600">Valor acima do saldo disponível.</p>}
+      <Field label="Referência (opcional)"><Input maxLength={100} placeholder="Ex.: venda 1234, cupom" value={reference} onChange={e => setReference(e.target.value)} /></Field>
+      <Button type="submit" className="w-full" disabled={redeem.isPending || !amountCents || !wallet.data || amountCents > available}>Resgatar no ERP</Button>
+      <Status pending={redeem.isPending} error={redeem.error} />
+      {redeem.isSuccess && <Done>Resgate de {cents(redeem.data.redeemedCents)} registrado. Saldo restante: {cents(redeem.data.availableAfterCents)}.</Done>}
+    </div>
+  </form>;
+}
+
+function Operations({ customer }: { customer: string | null }) {
+  const operations = useSat<{ rows: Row[] }>("/cashback/operations" + (customer ? `?customer=${customer}` : ""));
+  return <Card title="Lançamentos e resgates pelo sistema" flush>
+    {(operations.isPending || operations.error) && <div className="px-5 py-4"><Status pending={operations.isPending} error={operations.error} /></div>}
+    {operations.data && <Grid bare right={[3]} columns={["Quando","Operação","Cliente","Valor","Venda / referência"]}
+      rows={operations.data.rows.map(r => [new Date(String(r.created_at)).toLocaleString("pt-BR",{ dateStyle:"short", timeStyle:"short" }),
+        <StatusText value={r.kind === "credit" ? "Lançamento" : "Resgate"} />,
+        <TextLink to={`/contacts/${r.customer}`}>{r.customer}</TextLink>, cents(r.amount_cents),
+        r.kind === "credit" ? `Venda ${r.sale_id} de ${brDate(r.sale_date)}` : (r.reference || "—")])} />}
+  </Card>;
+}
+
 export function SatCashback() {
+  const cache = useQueryClient();
   const [offset,setOffset] = useState(0);
   const [params] = useSearchParams();
   const customer = params.get("customer");
@@ -466,11 +559,14 @@ export function SatCashback() {
   const pageParams = new URLSearchParams({ ...filters, offset:String(offset) });
   if (customer) pageParams.set("customer",customer);
   const page = useSat<Page>("/cashback?" + pageParams);
-  const role = useSatAccess()?.role;
+  const satAccess = useSatAccess();
+  const role = satAccess?.role;
+  const canWrite = !!satAccess?.erpWrite && (role === "admin" || role === "operator");
+  const refresh = () => void cache.invalidateQueries({ queryKey: ["sat"] });
   return <Screen title="Cashback" subtitle={customer ? `Cliente SAT ${customer}` : "Créditos de cashback no ERP SAT"}
     actions={role === "admin" && <LinkButton to="/cashback/rules">Regras das lojas</LinkButton>}>
-    <div className="grid items-start gap-6">
-      <div className="min-w-0 space-y-6">
+    <div className={`grid items-start gap-6 ${canWrite ? "xl:grid-cols-[1fr_360px]" : ""}`}>
+      <div className="order-2 min-w-0 space-y-6 xl:order-1">
         <Card title="Movimentações" flush>
           <form className="flex flex-wrap items-end gap-3 border-b px-5 py-4" onSubmit={e => {
             e.preventDefault();
@@ -495,7 +591,12 @@ export function SatCashback() {
               cents(r.redeemed_cents),cents(r.remaining_cents),brDate(r.expires_at),<StatusText value={r.status} />])} />
             <Pagination offset={offset} more={page.data.more} change={setOffset} /></>}
         </Card>
+        <Operations customer={customer} />
       </div>
+      {canWrite && <div className="order-1 space-y-6 xl:order-2">
+        <LaunchCredit initialDate={params.get("date") || ""} initialSale={params.get("sale") || ""} onDone={refresh} />
+        <RedeemCredit initialCustomer={customer || ""} onDone={refresh} />
+      </div>}
     </div>
   </Screen>;
 }
